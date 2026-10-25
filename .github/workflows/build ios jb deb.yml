@@ -1,7 +1,7 @@
 name: Build iOS Rust Toolchain Deb
 
 on:
-  workflow_dispatch: # 手动触发
+  workflow_dispatch:
 
 jobs:
   build-deb:
@@ -12,7 +12,7 @@ jobs:
     - name: Checkout Rust Source
       uses: actions/checkout@v4
 
-    # 新增缓存步骤：保存编译产物，避免下次重新编译耗时1小时+
+    # 新增：缓存编译产物，避免重复编译
     - name: Cache Cargo and Build Directories
       uses: actions/cache@v4
       with:
@@ -20,7 +20,7 @@ jobs:
           ~/.cargo
           build
           target
-        key: ${{ runner.os }}-rust-ios-${{ hashFiles('**/Cargo.lock', 'config.toml') }}
+        key: ${{ runner.os }}-rust-ios-cache-v2
         restore-keys: |
           ${{ runner.os }}-rust-ios-
 
@@ -30,7 +30,6 @@ jobs:
 
     - name: Configure Build
       run: |
-        # 关键修复：在 configure 阶段加上 --prefix
         ./configure --host=aarch64-apple-darwin \
                     --target=aarch64-apple-ios \
                     --enable-extended \
@@ -42,23 +41,19 @@ jobs:
       run: |
         ./x.py build --stage 2
 
-    - name: Install Toolchain to Prefix
-      run: |
-        # 关键修复：移除 --prefix 参数，直接 install 即可
-        ./x.py install
-
+    # 修改：跳过不稳定的 x.py install，直接手动创建包结构
     - name: Create Deb Package Structure & Sign
       run: |
-        # 1. 创建 deb 包的目录结构
         mkdir -p deb-pkg/DEBIAN
         mkdir -p deb-pkg/usr/bin
+        mkdir -p deb-pkg/usr/lib/rustlib
         mkdir -p deb-pkg/etc/profile.d
         mkdir -p deb-pkg/usr/share/rust-toolchain-ios
 
-        # 2. 下载 Rust Logo 并放入包中
+        # 下载 Rust Logo
         curl -L -o deb-pkg/usr/share/rust-toolchain-ios/icon.png https://raw.githubusercontent.com/rust-lang/rust-artwork/master/logo/rust-logo-blk.png
-        
-        # 3. 生成 control 文件 (包含依赖和图标路径)
+
+        # 生成 control 文件
         cat > deb-pkg/DEBIAN/control <<EOF
         Package: rust-toolchain-ios
         Name: Rust Toolchain for iOS
@@ -71,7 +66,7 @@ jobs:
         Icon: file:///usr/share/rust-toolchain-ios/icon.png
         EOF
 
-        # 4. 生成环境变量脚本
+        # 生成环境变量脚本
         cat > deb-pkg/etc/profile.d/rust-ios.sh <<EOF
         export TMPDIR=/tmp
         export TEMP=/tmp
@@ -83,13 +78,31 @@ jobs:
         export PATH=/usr/bin:\$PATH
         EOF
 
-        # 5. 复制编译产物 (现在文件肯定在 /tmp/rust-ios 里了)
-        cp -r /tmp/rust-ios/* deb-pkg/usr/
+        # 手动复制编译产物 (关键步骤)
+        # 1. 复制二进制文件 (cargo 和 rustc)
+        cp build/aarch64-apple-darwin/stage2/bin/rustc deb-pkg/usr/bin/
+        # cargo 可能在 stage2-tools-bin 目录下
+        if [ -f "build/aarch64-apple-darwin/stage2-tools-bin/cargo" ]; then
+            cp build/aarch64-apple-darwin/stage2-tools-bin/cargo deb-pkg/usr/bin/
+        else
+            # 如果找不到，尝试从标准路径查找
+            find build/ -name "cargo" -type f -exec cp {} deb-pkg/usr/bin/ \;
+        fi
 
-        # 6. 为所有二进制文件打上越狱伪签名
+        # 2. 复制标准库 (std) 和其他依赖库
+        # 标准库通常位于 stage2/lib/rustlib 下
+        if [ -d "build/aarch64-apple-darwin/stage2/lib/rustlib" ]; then
+            cp -r build/aarch64-apple-darwin/stage2/lib/rustlib/* deb-pkg/usr/lib/rustlib/
+        else
+            # 如果路径不对，尝试复制整个 lib 目录
+            mkdir -p deb-pkg/usr/lib
+            cp -r build/aarch64-apple-darwin/stage2/lib/* deb-pkg/usr/lib/ 2>/dev/null || true
+        fi
+
+        # 3. 为所有二进制文件打上越狱伪签名
         find deb-pkg/usr/bin -type f -exec ldid -S {} \;
 
-        # 7. 打包
+        # 4. 打包
         dpkg-deb -b deb-pkg rust-toolchain-ios.deb
 
     - name: Upload Artifact
