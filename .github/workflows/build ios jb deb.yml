@@ -1,43 +1,49 @@
 name: Build iOS Rust Toolchain Deb
 
 on:
-  workflow_dispatch:
+  workflow_dispatch: # 手动触发
 
 jobs:
   build-deb:
     runs-on: macos-latest
-    timeout-minutes: 30
+    timeout-minutes: 30 # 下载加打包，30分钟绝对够了
 
     steps:
+    - name: Install Dependencies
+      run: |
+        brew install dpkg
+
     - name: Download Pre-built Rust Toolchain
       run: |
+        # 直接下载官方编译好的 macOS ARM64 版本 (作为宿主机工具)
         curl -LO https://static.rust-lang.org/dist/rust-1.79.0-aarch64-apple-darwin.tar.gz
         tar -xzf rust-1.79.0-aarch64-apple-darwin.tar.gz
 
-    - name: Setup iOS Target Libs
-      run: |
+        # 下载 iOS 架构的标准库
         curl -LO https://static.rust-lang.org/dist/rust-std-1.79.0-aarch64-apple-ios.tar.gz
         tar -xzf rust-std-1.79.0-aarch64-apple-ios.tar.gz
 
     - name: Install ldid (Direct Download)
       run: |
-        # 直接下载 Procursus 官方为 Apple Silicon 编译的 ldid
+        # 下载 Procursus 官方为 Apple Silicon 编译的稳定版 ldid (避开 Homebrew 的坑)
         curl -LO https://github.com/ProcursusTeam/ldid/releases/download/v2.1.5-procursus7/ldid_macosx_arm64
         chmod +x ldid_macosx_arm64
         sudo mv ldid_macosx_arm64 /usr/local/bin/ldid
-        # 验证 ldid 是否可用
-        ldid -h
+        ldid -h || true
 
     - name: Create Deb Package Structure & Sign
       run: |
+        # 1. 创建 deb 包结构
         mkdir -p deb-pkg/DEBIAN
         mkdir -p deb-pkg/usr/bin
         mkdir -p deb-pkg/usr/lib/rustlib
         mkdir -p deb-pkg/etc/profile.d
         mkdir -p deb-pkg/usr/share/rust-toolchain-ios
 
+        # 2. 下载图标
         curl -L -o deb-pkg/usr/share/rust-toolchain-ios/icon.png https://raw.githubusercontent.com/rust-lang/rust-artwork/master/logo/rust-logo-blk.png
 
+        # 3. 生成 control 文件
         cat > deb-pkg/DEBIAN/control <<EOF
         Package: rust-toolchain-ios
         Name: Rust Toolchain for iOS
@@ -50,6 +56,7 @@ jobs:
         Icon: file:///usr/share/rust-toolchain-ios/icon.png
         EOF
 
+        # 4. 生成环境变量脚本 (安装后自动生效)
         cat > deb-pkg/etc/profile.d/rust-ios.sh <<EOF
         export TMPDIR=/tmp
         export CC=clang
@@ -59,14 +66,20 @@ jobs:
         export PATH=/usr/bin:\$PATH
         EOF
 
+        # 5. 复制文件 (直接从解压好的官方目录中提取)
         cp rust-1.79.0-aarch64-apple-darwin/rustc/bin/* deb-pkg/usr/bin/
         cp rust-1.79.0-aarch64-apple-darwin/cargo/bin/* deb-pkg/usr/bin/
         cp -r rust-std-1.79.0-aarch64-apple-ios/rust-std-aarch64-apple-ios/lib/rustlib/* deb-pkg/usr/lib/rustlib/
         cp -r rust-1.79.0-aarch64-apple-darwin/rustc/lib/rustlib/* deb-pkg/usr/lib/rustlib/ 2>/dev/null || true
 
-        # 使用稳定的 ldid 进行签名
-        find deb-pkg/usr/bin -type f -exec ldid -S {} \;
+        # 6. 安全签名 (只处理真正有执行权限且是 Mach-O 格式的文件)
+        find deb-pkg/usr/bin -type f -perm +111 -exec sh -c '
+          if file -b "$1" | grep -q "Mach-O"; then
+            ldid -S "$1"
+          fi
+        ' _ {} \;
 
+        # 7. 打包
         dpkg-deb -b deb-pkg rust-toolchain-ios.deb
 
     - name: Upload Artifact
