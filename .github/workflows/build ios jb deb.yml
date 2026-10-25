@@ -1,12 +1,12 @@
 name: Build iOS Rust Toolchain Deb
 
 on:
-  workflow_dispatch: # 手动触发
+  workflow_dispatch: # 手动触发，方便调试
 
 jobs:
   build-deb:
     runs-on: macos-latest
-    timeout-minutes: 360 
+    timeout-minutes: 360 # 编译 Rust 极耗时间，必须拉长超时限制
 
     steps:
     - name: Checkout Rust Source
@@ -18,24 +18,32 @@ jobs:
 
     - name: Configure Build
       run: |
+        # 关键：加上 --prefix=/tmp/rust-ios，方便后续统一提取文件
         ./configure --host=aarch64-apple-darwin \
                     --target=aarch64-apple-ios \
                     --enable-extended \
                     --tools=cargo,rustc \
-                    --disable-docs
+                    --disable-docs \
+                    --prefix=/tmp/rust-ios
 
     - name: Build Rust Compiler & Cargo
       run: |
+        # 阶段 2 编译，耗时较长
         ./x.py build --stage 2
+
+    - name: Install Toolchain to Prefix
+      run: |
+        # 将编译好的所有文件 (bin, lib, share) 安装到指定目录
+        ./x.py install --prefix=/tmp/rust-ios
 
     - name: Create Deb Package Structure & Sign
       run: |
-        # 1. 创建 deb 包所需的目录结构
+        # 1. 创建 deb 包的目录结构
         mkdir -p deb-pkg/DEBIAN
         mkdir -p deb-pkg/usr/bin
         mkdir -p deb-pkg/etc/profile.d
 
-        # 2. 生成 control 文件 (依赖写在这里)
+        # 2. 生成 control 文件（包含你手机上需要的依赖）
         cat > deb-pkg/DEBIAN/control <<EOF
         Package: rust-toolchain-ios
         Name: Rust Toolchain for iOS
@@ -47,7 +55,7 @@ jobs:
         Section: Development
         EOF
 
-        # 3. 生成环境变量配置脚本 (安装后会自动放到手机的 /etc/profile.d/ 下)
+        # 3. 生成环境变量脚本（安装后会在手机的 /etc/profile.d/ 生效）
         cat > deb-pkg/etc/profile.d/rust-ios.sh <<EOF
         export TMPDIR=/tmp
         export TEMP=/tmp
@@ -59,16 +67,14 @@ jobs:
         export PATH=/usr/bin:\$PATH
         EOF
 
-        # 4. 复制编译产物到 usr/bin
-        BIN_DIR="build/aarch64-apple-ios/stage2/bin"
-        cp $BIN_DIR/cargo deb-pkg/usr/bin/
-        cp $BIN_DIR/rustc deb-pkg/usr/bin/
+        # 4. 复制编译产物 (bin 放 usr/bin, lib 放 usr/lib)
+        cp -r /tmp/rust-ios/* deb-pkg/usr/
 
-        # 5. 为二进制文件打上越狱伪签名
-        ldid -S deb-pkg/usr/bin/cargo
-        ldid -S deb-pkg/usr/bin/rustc
+        # 5. 为所有二进制文件打上越狱伪签名
+        # 使用 find 自动找到 usr/bin 下的所有可执行文件并签名
+        find deb-pkg/usr/bin -type f -exec ldid -S {} \;
 
-        # 6. 打包成 deb
+        # 6. 打包
         dpkg-deb -b deb-pkg rust-toolchain-ios.deb
 
     - name: Upload Artifact
