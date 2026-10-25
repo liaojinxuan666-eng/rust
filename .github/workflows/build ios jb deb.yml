@@ -1,16 +1,28 @@
 name: Build iOS Rust Toolchain Deb
 
 on:
-  workflow_dispatch: # 手动触发，方便调试
+  workflow_dispatch: # 手动触发
 
 jobs:
   build-deb:
     runs-on: macos-latest
-    timeout-minutes: 360 # 编译 Rust 极耗时间，必须拉长超时限制
+    timeout-minutes: 360
 
     steps:
     - name: Checkout Rust Source
       uses: actions/checkout@v4
+
+    # 新增缓存步骤：保存编译产物，避免下次重新编译耗时1小时+
+    - name: Cache Cargo and Build Directories
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo
+          build
+          target
+        key: ${{ runner.os }}-rust-ios-${{ hashFiles('**/Cargo.lock', 'config.toml') }}
+        restore-keys: |
+          ${{ runner.os }}-rust-ios-
 
     - name: Install Dependencies
       run: |
@@ -18,7 +30,7 @@ jobs:
 
     - name: Configure Build
       run: |
-        # 关键：加上 --prefix=/tmp/rust-ios，方便后续统一提取文件
+        # 关键修复：在 configure 阶段加上 --prefix
         ./configure --host=aarch64-apple-darwin \
                     --target=aarch64-apple-ios \
                     --enable-extended \
@@ -28,13 +40,12 @@ jobs:
 
     - name: Build Rust Compiler & Cargo
       run: |
-        # 阶段 2 编译，耗时较长
         ./x.py build --stage 2
 
     - name: Install Toolchain to Prefix
       run: |
-        # 将编译好的所有文件 (bin, lib, share) 安装到指定目录
-        ./x.py install --prefix=/tmp/rust-ios
+        # 关键修复：移除 --prefix 参数，直接 install 即可
+        ./x.py install
 
     - name: Create Deb Package Structure & Sign
       run: |
@@ -42,8 +53,12 @@ jobs:
         mkdir -p deb-pkg/DEBIAN
         mkdir -p deb-pkg/usr/bin
         mkdir -p deb-pkg/etc/profile.d
+        mkdir -p deb-pkg/usr/share/rust-toolchain-ios
 
-        # 2. 生成 control 文件（包含你手机上需要的依赖）
+        # 2. 下载 Rust Logo 并放入包中
+        curl -L -o deb-pkg/usr/share/rust-toolchain-ios/icon.png https://raw.githubusercontent.com/rust-lang/rust-artwork/master/logo/rust-logo-blk.png
+        
+        # 3. 生成 control 文件 (包含依赖和图标路径)
         cat > deb-pkg/DEBIAN/control <<EOF
         Package: rust-toolchain-ios
         Name: Rust Toolchain for iOS
@@ -53,9 +68,10 @@ jobs:
         Depends: llvm-16, libtapi-dev, libssl3, zlib1g, libzstd1, xz-utils, libcurl4, git, pkg-config, make
         Description: Rust compiler (rustc) and cargo for iOS jailbreak environment.
         Section: Development
+        Icon: file:///usr/share/rust-toolchain-ios/icon.png
         EOF
 
-        # 3. 生成环境变量脚本（安装后会在手机的 /etc/profile.d/ 生效）
+        # 4. 生成环境变量脚本
         cat > deb-pkg/etc/profile.d/rust-ios.sh <<EOF
         export TMPDIR=/tmp
         export TEMP=/tmp
@@ -67,14 +83,13 @@ jobs:
         export PATH=/usr/bin:\$PATH
         EOF
 
-        # 4. 复制编译产物 (bin 放 usr/bin, lib 放 usr/lib)
+        # 5. 复制编译产物 (现在文件肯定在 /tmp/rust-ios 里了)
         cp -r /tmp/rust-ios/* deb-pkg/usr/
 
-        # 5. 为所有二进制文件打上越狱伪签名
-        # 使用 find 自动找到 usr/bin 下的所有可执行文件并签名
+        # 6. 为所有二进制文件打上越狱伪签名
         find deb-pkg/usr/bin -type f -exec ldid -S {} \;
 
-        # 6. 打包
+        # 7. 打包
         dpkg-deb -b deb-pkg rust-toolchain-ios.deb
 
     - name: Upload Artifact
