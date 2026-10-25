@@ -1,0 +1,59 @@
+name: Build iOS Rust Toolchain Deb
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build-deb:
+    runs-on: macos-latest
+    
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      
+    - name: Setup Rust Toolchain
+      run: |
+        rustup update stable
+        rustup target add aarch64-apple-ios
+        
+    - name: Build Release
+      run: |
+        # 确保使用正确的 SDKROOT (GitHub macOS runner 已配置好 Xcode)
+        cargo build --release --target aarch64-apple-ios
+        
+    - name: Sign Binaries
+      run: |
+        brew install ldid
+        # 假设二进制在 target/aarch64-apple-ios/release/ 下
+        ldid -S target/aarch64-apple-ios/release/cargo
+        ldid -S target/aarch64-apple-ios/release/rustc
+        
+    - name: Package Deb
+      run: |
+        mkdir -p deb-pkg/DEBIAN
+        mkdir -p deb-pkg/usr/bin
+        
+        # 填写控制文件 (记得替换版本、架构和依赖)
+        cat > deb-pkg/DEBIAN/control <<EOF
+        Package: rust-toolchain-ios
+        Name: Rust Toolchain
+        Version: 1.85.0
+        Architecture: iphoneos-arm64
+        Maintainer: YourName
+        Depends: llvm-16, libssl3, zlib1g
+        Description: Rust compiler and cargo for iOS
+        EOF
+        
+        # 复制已签名的二进制
+        cp target/aarch64-apple-ios/release/cargo deb-pkg/usr/bin/
+        cp target/aarch64-apple-ios/release/rustc deb-pkg/usr/bin/
+        
+        dpkg-deb -b deb-pkg rust-toolchain-ios.deb
+        
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: rust-ios-deb
+        path: rust-toolchain-ios.deb
