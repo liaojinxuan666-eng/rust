@@ -1,57 +1,70 @@
 name: Build iOS Rust Toolchain Deb
 
 on:
-  push:
-    branches: [ main ]
-  workflow_dispatch:
+  workflow_dispatch: # 强烈建议手动触发，因为编译很久，不要用 push 触发
 
 jobs:
   build-deb:
     runs-on: macos-latest
-    
+    timeout-minutes: 360 # 必须延长超时时间，默认 6 小时，防止编译一半被掐断
+
     steps:
-    - name: Checkout
+    - name: Checkout Rust Source
       uses: actions/checkout@v4
-      
-    - name: Setup Rust Toolchain
+
+    - name: Install Dependencies
       run: |
-        rustup update stable
-        rustup target add aarch64-apple-ios
-        
-    - name: Build Release
+        brew install cmake ninja ldid dpkg
+        # 确保有 Python3 (x.py 依赖)
+        python3 --version
+
+    - name: Configure Build
       run: |
-        # 确保使用正确的 SDKROOT (GitHub macOS runner 已配置好 Xcode)
-        cargo build --release --target aarch64-apple-ios
-        
-    - name: Sign Binaries
+        # 关键配置：让 macOS (arm64) 构建出 运行在 iOS (arm64) 上的编译器
+        # --enable-extended 会同时编译 cargo 和 rustc 等工具
+        # --disable-docs 跳过文档生成，节省大量时间
+        ./configure --host=aarch64-apple-darwin \
+                    --target=aarch64-apple-ios \
+                    --enable-extended \
+                    --tools=cargo,rustc \
+                    --disable-docs
+
+    - name: Build Rust Compiler & Cargo
       run: |
-        brew install ldid
-        # 假设二进制在 target/aarch64-apple-ios/release/ 下
-        ldid -S target/aarch64-apple-ios/release/cargo
-        ldid -S target/aarch64-apple-ios/release/rustc
-        
-    - name: Package Deb
+        # 使用 x.py 开始引导编译。stage 2 代表完整优化的版本
+        # 这一步会非常久，建议去喝杯咖啡
+        ./x.py build --stage 2
+
+    - name: Sign and Package Deb
       run: |
         mkdir -p deb-pkg/DEBIAN
         mkdir -p deb-pkg/usr/bin
-        
-        # 填写控制文件 (记得替换版本、架构和依赖)
+
+        # 1. 编写控制文件 (你可以修改 version)
         cat > deb-pkg/DEBIAN/control <<EOF
         Package: rust-toolchain-ios
-        Name: Rust Toolchain
-        Version: 1.85.0
+        Name: Rust Toolchain for iOS
+        Version: 1.79.0
         Architecture: iphoneos-arm64
         Maintainer: YourName
-        Depends: llvm-16, libssl3, zlib1g
-        Description: Rust compiler and cargo for iOS
+        Depends: llvm-16, libssl3, zlib1g, libtapi-dev
+        Description: Rust compiler (rustc) and cargo for iOS jailbreak.
+        Section: Development
         EOF
-        
-        # 复制已签名的二进制
-        cp target/aarch64-apple-ios/release/cargo deb-pkg/usr/bin/
-        cp target/aarch64-apple-ios/release/rustc deb-pkg/usr/bin/
-        
+
+        # 2. 提取编译好的二进制文件
+        # 注意：x.py build 出来的产物在 build 目录下
+        BIN_DIR="build/aarch64-apple-ios/stage2/bin"
+        cp $BIN_DIR/cargo deb-pkg/usr/bin/
+        cp $BIN_DIR/rustc deb-pkg/usr/bin/
+
+        # 3. 使用 ldid 伪签名 (iOS 越狱环境必须)
+        ldid -S deb-pkg/usr/bin/cargo
+        ldid -S deb-pkg/usr/bin/rustc
+
+        # 4. 打包成 deb
         dpkg-deb -b deb-pkg rust-toolchain-ios.deb
-        
+
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
